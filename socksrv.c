@@ -15,12 +15,15 @@ along with this program; see the file COPYING. If not, see
 <http://www.gnu.org/licenses/>.  */
 
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <ifaddrs.h>
 #include <limits.h>
 #include <netinet/in.h>
 #include <signal.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include <sys/mman.h>
 #include <sys/socket.h>
@@ -44,6 +47,125 @@ along with this program; see the file COPYING. If not, see
 #define PAYLOAD_MAGIC_PS4_SELF 0x1D3D154F // PS4 SELF payload
 #define PAYLOAD_MAGIC_PS5_SELF 0xEEF51454 // PS5 SELF payload
 #define PAYLOAD_MAGIC_HTTP_GET 0x20544547 // HTTP GET request
+
+#define ELFDR_DATA_DIR "/data/elfldr"
+
+
+/**
+ * Read an ELF file from disk.
+ **/
+static int
+elf_read_file(const char* path, uint8_t** elf, size_t* elf_size) {
+  uint8_t* buf;
+  ssize_t size;
+  FILE* f;
+
+  if(!(f=fopen(path, "rb"))) {
+    return -1;
+  }
+  if(fseek(f, 0, SEEK_END)) {
+    fclose(f);
+    return -1;
+  }
+  if((size=ftell(f)) < 0) {
+    fclose(f);
+    return -1;
+  }
+  if(fseek(f, 0, SEEK_SET)) {
+    fclose(f);
+    return -1;
+  }
+  if(!(buf=malloc(size))) {
+    fclose(f);
+    return -1;
+  }
+  if(fread(buf, 1, size, f) != (size_t)size) {
+    free(buf);
+    fclose(f);
+    return -1;
+  }
+  if(fclose(f)) {
+    free(buf);
+    return -1;
+  }
+
+  *elf = buf;
+  *elf_size = size;
+  return 0;
+}
+
+
+/**
+ * Find the first .elf file in a directory (readdir order).
+ **/
+static int
+elf_find_first(const char* dir, char* path, size_t path_size) {
+  DIR* d;
+  struct dirent* ent;
+  size_t n;
+
+  if(!(d=opendir(dir))) {
+    return -1;
+  }
+
+  while((ent=readdir(d))) {
+    if(ent->d_name[0] == '.') {
+      continue;
+    }
+    n = strlen(ent->d_name);
+    if(n < 5 || strcasecmp(ent->d_name + n - 4, ".elf")) {
+      continue;
+    }
+    snprintf(path, path_size, "%s/%s", dir, ent->d_name);
+    closedir(d);
+    return 0;
+  }
+
+  closedir(d);
+  return -1;
+}
+
+
+/**
+ * Load and spawn the first ELF payload in /data/elfldr before serving.
+ **/
+static void
+load_data_elfldr(void) {
+  char path[PATH_MAX];
+  char* const argv[] = {0, 0};
+  uint8_t* buf = 0;
+  size_t len = 0;
+  pid_t pid;
+
+  if(elf_find_first(ELFDR_DATA_DIR, path, sizeof(path))) {
+    LOG_PRINTF("No ELF in %s, skip startup payload\n", ELFDR_DATA_DIR);
+    return;
+  }
+
+  LOG_PRINTF("Loading startup payload %s\n", path);
+
+  if(elf_read_file(path, &buf, &len)) {
+    LOG_PERROR("elf_read_file");
+    return;
+  }
+
+  if(elfldr_sanity_check(buf, len)) {
+    LOG_PUTS("Startup ELF sanity check failed");
+    free(buf);
+    return;
+  }
+
+  argv[0] = strrchr(path, '/');
+  argv[0] = argv[0] ? argv[0] + 1 : path;
+
+  if((pid=elfldr_spawn(-1, argv, buf, len)) < 0) {
+    LOG_PUTS("elfldr_spawn startup payload failed");
+  } else {
+    LOG_PRINTF("Spawned startup payload pid=%d\n", pid);
+  }
+
+  free(buf);
+}
 
 
 /**
@@ -399,6 +521,8 @@ int main() {
   syscall(SYS_thr_set_name, -1, "elfldr.elf");
   signal(SIGCHLD, SIG_IGN);
   signal(SIGPIPE, SIG_IGN);
+
+  load_data_elfldr();
 
   notify_address("Serving ELF loader on", port);
   while(1) {
