@@ -132,7 +132,7 @@ elf_find_first(const char* dir, char* path, size_t path_size) {
 static void
 load_data_elfldr(void) {
   char path[PATH_MAX];
-  char* const argv[] = {0, 0};
+  char* filename;
   uint8_t* buf = 0;
   size_t len = 0;
   pid_t pid;
@@ -155,13 +155,16 @@ load_data_elfldr(void) {
     return;
   }
 
-  argv[0] = strrchr(path, '/');
-  argv[0] = argv[0] ? argv[0] + 1 : path;
+  filename = strrchr(path, '/');
+  filename = filename ? filename + 1 : path;
+  {
+    char* const argv[] = {filename, 0};
 
-  if((pid=elfldr_spawn(-1, argv, buf, len)) < 0) {
-    LOG_PUTS("elfldr_spawn startup payload failed");
-  } else {
-    LOG_PRINTF("Spawned startup payload pid=%d\n", pid);
+    if((pid=elfldr_spawn(-1, argv, buf, len)) < 0) {
+      LOG_PUTS("elfldr_spawn startup payload failed");
+    } else {
+      LOG_PRINTF("Spawned startup payload pid=%d\n", pid);
+    }
   }
 
   free(buf);
